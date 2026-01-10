@@ -1,0 +1,25 @@
+# Copy this file to terraform.tfvars and fill in your values
+
+project_id = "your-gcp-project-id"
+region     = "us-central1"
+
+# Container images
+# Spin image defaults to ghcr.io/always-further/deepfabric/tools-sdk:latest
+# spin_image = "ghcr.io/always-further/deepfabric/tools-sdk:latest"
+
+# DeepFabric job image (build and push to Artifact Registry)
+deepfabric_image = "us-central1-docker.pkg.dev/your-project/dfcloud/deepfabric-job:latest"
+
+# Slack webhook URL (from api.slack.com/apps)
+slack_webhook_url = "https://hooks.slack.com/services/T.../B.../xxx"
+
+# Optional: customize bucket name (defaults to {project_id}-dfcloud)
+# bucket_name = "my-custom-bucket"
+
+# Optional: Spin service scaling
+# spin_min_instances = 1  # Set to 0 for scale-to-zero (cold starts)
+
+# Optional: DeepFabric job resources
+# deepfabric_job_timeout = 3600   # 1 hour
+# deepfabric_job_memory  = "4Gi"
+# deepfabric_job_cpu     = "2"
