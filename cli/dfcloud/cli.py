@@ -521,27 +521,24 @@ def get_spin_service_url() -> str:
         sys.exit(1)
 
 
-def load_tools_into_spin(spin_url: str, headers: dict, schema: dict) -> int:
-    """Load tool definitions into Spin service."""
-    tools = schema.get("tools", [])
-    loaded = 0
-
-    for tool in tools:
-        try:
-            response = requests.post(
-                f"{spin_url}/mock/register-tool",
-                headers=headers,
-                json=tool,
-                timeout=30,
-            )
-            if response.status_code == 200:
-                loaded += 1
-            else:
-                console.print(f"  [yellow]Warning:[/yellow] Failed to register {tool['name']}: {response.text}")
-        except Exception as e:
-            console.print(f"  [yellow]Warning:[/yellow] Failed to register {tool['name']}: {e}")
-
-    return loaded
+def check_tools_available(spin_url: str, headers: dict) -> list[str]:
+    """Check what tools are available in the Spin service."""
+    try:
+        response = requests.get(
+            f"{spin_url}/mock/list-tools",
+            headers=headers,
+            timeout=30,
+        )
+        if response.status_code == 200:
+            data = response.json()
+            # Handle different response formats
+            if isinstance(data, list):
+                return [t.get("name", t) if isinstance(t, dict) else t for t in data]
+            elif isinstance(data, dict) and "tools" in data:
+                return [t.get("name", t) if isinstance(t, dict) else t for t in data["tools"]]
+        return []
+    except Exception:
+        return []
 
 
 def load_mock_responses(spin_url: str, headers: dict, mock_data: dict) -> int:
@@ -599,40 +596,94 @@ def load_fixtures(spin_url: str, headers: dict, mock_data: dict) -> int:
     return loaded
 
 
+def run_import_tools(spin_url: str, mcp_command: str) -> bool:
+    """Run deepfabric import-tools to register tools with Spin service."""
+    import subprocess
+
+    cmd = [
+        "deepfabric", "import-tools",
+        "--transport", "stdio",
+        "--command", mcp_command,
+        "--spin", spin_url,
+    ]
+
+    console.print(f"  Running: {' '.join(cmd)}")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+        if result.returncode == 0:
+            return True
+        else:
+            if result.stderr:
+                console.print(f"  [red]Error:[/red] {result.stderr[:500]}")
+            if result.stdout:
+                console.print(f"  Output: {result.stdout[:500]}")
+            return False
+
+    except FileNotFoundError:
+        console.print("  [red]Error:[/red] deepfabric not found. Install with: pip install deepfabric")
+        return False
+    except subprocess.TimeoutExpired:
+        console.print("  [red]Error:[/red] import-tools timed out after 120s")
+        return False
+    except Exception as e:
+        console.print(f"  [red]Error:[/red] {e}")
+        return False
+
+
 @cli.command()
-@click.option(
-    "--schema",
-    type=click.Path(exists=True),
-    help="Path to schema YAML file (or downloads from GCS if not specified)",
-)
 @click.option(
     "--mock-data",
     type=click.Path(exists=True),
     help="Path to mock data JSON file (or downloads from GCS if not specified)",
 )
 @click.option(
+    "--mcp-command",
+    default="npx dataforseo-mcp-server@latest",
+    help="Command to run the MCP server (default: npx dataforseo-mcp-server@latest)",
+)
+@click.option(
+    "--skip-import-tools",
+    is_flag=True,
+    help="Skip running deepfabric import-tools (use if tools already registered)",
+)
+@click.option(
     "--upload-first",
     is_flag=True,
-    help="Upload local schema and mock-data files to GCS before initializing",
+    help="Upload local mock-data file to GCS before initializing",
 )
-def init(schema: str | None, mock_data: str | None, upload_first: bool):
-    """Initialize Spin service with tool schema and mock data.
+def init(mock_data: str | None, mcp_command: str, skip_import_tools: bool, upload_first: bool):
+    """Initialize Spin service with tools and mock data.
 
-    This command loads tool definitions and mock responses into the Spin service.
+    This command:
+    1. Runs deepfabric import-tools to register tools from the MCP server
+    2. Loads mock responses into the Spin service
+
     Run this after deploying infrastructure, from Cloud Shell or a GCP environment.
 
-    Files can be provided locally or will be downloaded from GCS (gs://bucket/init/).
+    Prerequisites:
+    - deepfabric installed (pip install deepfabric)
+    - npx/node installed (for running MCP server)
 
     Examples:
 
-        # Using files from GCS (upload them first with --upload-first)
-        dfcloud init --upload-first --schema schema.yaml --mock-data mock.json
-
-        # Using files already in GCS
+        # Full initialization (import tools + load mock data)
         dfcloud init
 
-        # Using local files (must run from environment with Cloud Run access)
-        dfcloud init --schema schema.yaml --mock-data mock.json
+        # Skip import-tools if tools already registered
+        dfcloud init --skip-import-tools
+
+        # Use a different MCP server
+        dfcloud init --mcp-command "npx my-mcp-server"
+
+        # Upload mock data to GCS first
+        dfcloud init --upload-first --mock-data mock.json
     """
     project_id = get_config_value("project_id")
     bucket = get_config_value("bucket")
@@ -655,37 +706,11 @@ def init(schema: str | None, mock_data: str | None, upload_first: bool):
     storage_client = storage.Client(project=project_id)
     bucket_obj = storage_client.bucket(bucket)
 
-    if upload_first:
-        if schema:
-            console.print(f"Uploading schema to GCS...")
-            blob = bucket_obj.blob("init/schema.yaml")
-            blob.upload_from_filename(schema)
-            console.print(f"  Uploaded to gs://{bucket}/init/schema.yaml")
-
-        if mock_data:
-            console.print(f"Uploading mock data to GCS...")
-            blob = bucket_obj.blob("init/mock-data.json")
-            blob.upload_from_filename(mock_data)
-            console.print(f"  Uploaded to gs://{bucket}/init/mock-data.json")
-
-    # Load schema
-    schema_data = None
-    if schema:
-        console.print(f"Loading schema from: {schema}")
-        with open(schema, "r") as f:
-            schema_data = yaml.safe_load(f)
-    else:
-        # Try to download from GCS
-        console.print(f"Downloading schema from GCS...")
-        try:
-            blob = bucket_obj.blob("init/schema.yaml")
-            schema_content = blob.download_as_text()
-            schema_data = yaml.safe_load(schema_content)
-            console.print(f"  Downloaded from gs://{bucket}/init/schema.yaml")
-        except Exception as e:
-            console.print(f"[red]Error:[/red] Could not load schema from GCS: {e}")
-            console.print("Upload schema first: gsutil cp schema.yaml gs://{bucket}/init/")
-            sys.exit(1)
+    if upload_first and mock_data:
+        console.print(f"Uploading mock data to GCS...")
+        blob = bucket_obj.blob("init/mock-data.json")
+        blob.upload_from_filename(mock_data)
+        console.print(f"  Uploaded to gs://{bucket}/init/mock-data.json")
 
     # Load mock data
     mock_data_content = None
@@ -706,11 +731,22 @@ def init(schema: str | None, mock_data: str | None, upload_first: bool):
             console.print("Upload mock data first: gsutil cp mock-data.json gs://{bucket}/init/")
             sys.exit(1)
 
-    # Load tools into Spin
-    console.print("\nLoading tool definitions...")
-    tools_count = len(schema_data.get("tools", []))
-    tools_loaded = load_tools_into_spin(spin_url, headers, schema_data)
-    console.print(f"  Loaded {tools_loaded}/{tools_count} tools")
+    # Import tools from MCP server
+    if not skip_import_tools:
+        console.print("\nImporting tools from MCP server...")
+        if run_import_tools(spin_url, mcp_command):
+            console.print("  [green]Tools imported successfully[/green]")
+        else:
+            console.print("  [yellow]Warning:[/yellow] Failed to import tools. You may need to run manually:")
+            console.print(f"    deepfabric import-tools --transport stdio --command \"{mcp_command}\" --spin {spin_url}")
+
+    # Check available tools in Spin
+    console.print("\nChecking available tools in Spin service...")
+    available_tools = check_tools_available(spin_url, headers)
+    if available_tools:
+        console.print(f"  Found {len(available_tools)} tools available")
+    else:
+        console.print("  [yellow]Warning:[/yellow] No tools found. Import may have failed.")
 
     # Load mock responses
     console.print("Loading mock responses...")
