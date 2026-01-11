@@ -339,6 +339,49 @@ def send_slack_notification(
         print(f"Warning: Failed to send Slack notification: {e}")
 
 
+def send_job_started_notification(
+    webhook_url: str,
+    job_name: str,
+    mode: str,
+    config_path: str,
+) -> None:
+    """Send a job started notification to Slack."""
+    emoji = ":rocket:"
+    title = f"{emoji} Job Started: {job_name}"
+
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": title, "emoji": True},
+        },
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*Mode:*\n{mode}"},
+                {"type": "mrkdwn", "text": f"*Config:*\n`{config_path}`"},
+            ],
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"DeepFabric Cloud • {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC",
+                }
+            ],
+        },
+    ]
+
+    payload = {"blocks": blocks, "attachments": [{"color": "#3498db", "blocks": []}]}
+
+    try:
+        response = requests.post(webhook_url, json=payload, timeout=30)
+        response.raise_for_status()
+        print("Job started notification sent")
+    except Exception as e:
+        print(f"Warning: Failed to send job started notification: {e}")
+
+
 def get_identity_token(audience: str) -> str | None:
     """Get identity token from GCP metadata server."""
     metadata_url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity"
@@ -653,6 +696,23 @@ def run_generate_mode():
             # Get progress interval from environment (default 900 seconds / 15 min)
             progress_interval = get_progress_interval()
             print(f"Slack progress interval: {progress_interval} seconds")
+
+            # Determine mode for notification
+            if topic_only:
+                mode = "Topic graph generation"
+            elif topics_load_gcs:
+                mode = "Dataset generation (with existing topics)"
+            else:
+                mode = "Full pipeline (topics + dataset)"
+
+            # Send job started notification
+            if slack_webhook_url:
+                send_job_started_notification(
+                    webhook_url=slack_webhook_url,
+                    job_name=job_name,
+                    mode=mode,
+                    config_path=f"gs://{gcs_bucket}/{config_path}",
+                )
 
             # Run deepfabric
             success, output = run_deepfabric(
