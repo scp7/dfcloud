@@ -17,7 +17,6 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 import click
 import requests
@@ -26,7 +25,6 @@ from google.auth.transport.requests import Request
 from google.cloud import run_v2, storage
 from google.oauth2 import id_token
 from rich.console import Console
-from rich.progress import Progress
 from rich.table import Table
 
 console = Console()
@@ -123,7 +121,12 @@ def config_list():
 @click.option("--project", prompt="GCP Project ID", help="Your GCP project ID")
 @click.option("--region", default="us-central1", prompt="GCP Region", help="GCP region")
 @click.option("--bucket", prompt="GCS Bucket Name", help="GCS bucket for configs/outputs")
-@click.option("--progress-interval", default=900, prompt="Slack progress interval (seconds)", help="Seconds between Slack progress updates")
+@click.option(
+    "--progress-interval",
+    default=900,
+    prompt="Slack progress interval (seconds)",
+    help="Seconds between Slack progress updates",
+)
 def config_init(project: str, region: str, bucket: str, progress_interval: int):
     """Initialize configuration interactively."""
     cfg = load_config()
@@ -142,9 +145,16 @@ def config_init(project: str, region: str, bucket: str, progress_interval: int):
 @click.option("--name", "-n", help="Job name (defaults to config filename)")
 @click.option("--wait/--no-wait", default=False, help="Wait for job completion")
 @click.option("--timeout", default=3600, help="Job timeout in seconds")
-@click.option("--topic-only", is_flag=True, help="Only generate topic graph (skip dataset generation)")
-@click.option("--topics-load", type=str, help="GCS path to existing topic graph (e.g., outputs/job/timestamp/graph.jsonl)")
-def submit(config_file: str, name: str | None, wait: bool, timeout: int, topic_only: bool, topics_load: str | None):
+@click.option("--topic-only", is_flag=True, help="Only generate topic graph")
+@click.option("--topics-load", type=str, help="GCS path to existing topic graph")
+def submit(
+    config_file: str,
+    name: str | None,
+    wait: bool,
+    timeout: int,
+    topic_only: bool,
+    topics_load: str | None,
+):
     """Submit a DeepFabric job.
 
     CONFIG_FILE is the path to your deepfabric YAML configuration file.
@@ -184,9 +194,9 @@ def submit(config_file: str, name: str | None, wait: bool, timeout: int, topic_o
     console.print(f"  Config: gs://{bucket}/{gcs_config_path}")
 
     if topic_only:
-        console.print(f"  Mode: [cyan]Topic graph generation only[/cyan]")
+        console.print("  Mode: [cyan]Topic graph generation only[/cyan]")
     elif topics_load:
-        console.print(f"  Mode: [cyan]Dataset generation[/cyan]")
+        console.print("  Mode: [cyan]Dataset generation[/cyan]")
         console.print(f"  Topics: gs://{bucket}/{topics_load}")
 
     # Execute Cloud Run Job
@@ -212,9 +222,7 @@ def submit(config_file: str, name: str | None, wait: bool, timeout: int, topic_o
 
         # Create execution with overrides
         overrides = run_v2.RunJobRequest.Overrides(
-            container_overrides=[
-                run_v2.RunJobRequest.Overrides.ContainerOverride(env=env_vars)
-            ],
+            container_overrides=[run_v2.RunJobRequest.Overrides.ContainerOverride(env=env_vars)],
             timeout=f"{timeout}s",
         )
 
@@ -231,7 +239,7 @@ def submit(config_file: str, name: str | None, wait: bool, timeout: int, topic_o
     except Exception:
         pass
 
-    console.print(f"  [green]Job submitted![/green]")
+    console.print("  [green]Job submitted![/green]")
 
     if execution_name:
         execution_id = execution_name.split("/")[-1]
@@ -256,8 +264,11 @@ def submit(config_file: str, name: str | None, wait: bool, timeout: int, topic_o
 
 
 @cli.command("import-tools")
-@click.option("--mcp-command", default="npx dataforseo-mcp-server@latest",
-              help="Command to run the MCP server")
+@click.option(
+    "--mcp-command",
+    default="npx dataforseo-mcp-server@latest",
+    help="Command to run the MCP server",
+)
 @click.option("--wait/--no-wait", default=True, help="Wait for completion")
 def import_tools(mcp_command: str, wait: bool):
     """Import tool schemas from MCP server into Spin service.
@@ -303,7 +314,7 @@ def import_tools(mcp_command: str, wait: bool):
     except Exception:
         pass
 
-    console.print(f"  [green]Import job submitted![/green]")
+    console.print("  [green]Import job submitted![/green]")
 
     if execution_name:
         execution_id = execution_name.split("/")[-1]
@@ -344,7 +355,9 @@ def status(execution_id: str | None):
 
     if execution_id:
         # Get specific execution
-        execution_path = f"projects/{project_id}/locations/{region}/jobs/{job_name}/executions/{execution_id}"
+        execution_path = (
+            f"projects/{project_id}/locations/{region}/jobs/{job_name}/executions/{execution_id}"
+        )
         try:
             execution = executions_client.get_execution(name=execution_path)
             _print_execution_status(execution)
@@ -406,7 +419,11 @@ def logs(execution_id: str | None, follow: bool):
 
     # Build log query
     if execution_id:
-        filter_str = f'resource.type="cloud_run_job" resource.labels.job_name="{job_name}" labels."run.googleapis.com/execution_name"="{execution_id}"'
+        filter_str = (
+            f'resource.type="cloud_run_job" '
+            f'resource.labels.job_name="{job_name}" '
+            f'labels."run.googleapis.com/execution_name"="{execution_id}"'
+        )
     else:
         filter_str = f'resource.type="cloud_run_job" resource.labels.job_name="{job_name}"'
 
@@ -446,7 +463,8 @@ def logs(execution_id: str | None, follow: bool):
         if result.stderr and "ERROR" in result.stderr:
             console.print(f"[red]{result.stderr}[/red]")
     except FileNotFoundError:
-        console.print("[red]Error:[/red] gcloud CLI not found. Please install the Google Cloud SDK.")
+        console.print("[red]Error:[/red] gcloud CLI not found.")
+        console.print("Please install the Google Cloud SDK.")
         sys.exit(1)
 
 
@@ -508,7 +526,7 @@ def list_executions(limit: int):
 
 @cli.command()
 @click.argument("job_run_name")
-@click.option("--output", "-o", type=click.Path(), help="Output directory (defaults to current dir)")
+@click.option("--output", "-o", type=click.Path(), help="Output directory")
 def download(job_run_name: str, output: str | None):
     """Download job outputs.
 
@@ -599,7 +617,7 @@ def outputs(job_name: str | None, files: bool):
 
             relative_path = blob.name.replace(f"outputs/{job_name}/", "")
             size_kb = blob.size / 1024
-            size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb/1024:.1f} MB"
+            size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
             created = blob.time_created.strftime("%Y-%m-%d %H:%M") if blob.time_created else "-"
             # Show path that can be used with --topics-load
             gcs_path = blob.name
@@ -608,7 +626,7 @@ def outputs(job_name: str | None, files: bool):
 
         console.print(table)
         console.print(f"\nTo download: dfcloud download {job_name}")
-        console.print(f"To use as topics: dfcloud submit config.yaml --topics-load <GCS Path>")
+        console.print("To use as topics: dfcloud submit config.yaml --topics-load <GCS Path>")
         return
 
     # List all job folders
@@ -641,7 +659,7 @@ def outputs(job_name: str | None, files: bool):
                 continue
 
             size_kb = blob.size / 1024
-            size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb/1024:.1f} MB"
+            size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
 
             table.add_row(job, timestamp, filename, size_str, blob.name)
 
@@ -673,8 +691,8 @@ def outputs(job_name: str | None, files: bool):
             table.add_row(jn)
 
         console.print(table)
-        console.print(f"\nTo see files: dfcloud outputs <job-name>")
-        console.print(f"To download:  dfcloud download <job-name>")
+        console.print("\nTo see files: dfcloud outputs <job-name>")
+        console.print("To download:  dfcloud download <job-name>")
 
 
 def get_identity_token(audience: str) -> str:
@@ -771,9 +789,9 @@ def load_mock_responses(spin_url: str, headers: dict, mock_data: dict) -> int:
             if response.status_code == 200:
                 loaded += 1
             else:
-                console.print(f"  [yellow]Warning:[/yellow] Failed to load response for {tool_name}")
+                console.print(f"  [yellow]Warning:[/yellow] Failed to load: {tool_name}")
         except Exception as e:
-            console.print(f"  [yellow]Warning:[/yellow] Failed to load response for {tool_name}: {e}")
+            console.print(f"  [yellow]Warning:[/yellow] Failed to load {tool_name}: {e}")
 
     return loaded
 
@@ -811,10 +829,14 @@ def run_import_tools(spin_url: str, mcp_command: str, auth_token: str | None = N
     import subprocess
 
     cmd = [
-        "deepfabric", "import-tools",
-        "--transport", "stdio",
-        "--command", mcp_command,
-        "--spin", spin_url,
+        "deepfabric",
+        "import-tools",
+        "--transport",
+        "stdio",
+        "--command",
+        mcp_command,
+        "--spin",
+        spin_url,
     ]
 
     if auth_token:
@@ -840,7 +862,8 @@ def run_import_tools(spin_url: str, mcp_command: str, auth_token: str | None = N
             return False
 
     except FileNotFoundError:
-        console.print("  [red]Error:[/red] deepfabric not found. Install with: pip install deepfabric")
+        console.print("  [red]Error:[/red] deepfabric not found.")
+        console.print("  Install with: pip install deepfabric")
         return False
     except subprocess.TimeoutExpired:
         console.print("  [red]Error:[/red] import-tools timed out after 120s")
@@ -920,7 +943,7 @@ def init(mock_data: str | None, mcp_command: str, skip_import_tools: bool, uploa
     bucket_obj = storage_client.bucket(bucket)
 
     if upload_first and mock_data:
-        console.print(f"Uploading mock data to GCS...")
+        console.print("Uploading mock data to GCS...")
         blob = bucket_obj.blob("init/mock-data.json")
         blob.upload_from_filename(mock_data)
         console.print(f"  Uploaded to gs://{bucket}/init/mock-data.json")
@@ -933,7 +956,7 @@ def init(mock_data: str | None, mcp_command: str, skip_import_tools: bool, uploa
             mock_data_content = json.load(f)
     else:
         # Try to download from GCS
-        console.print(f"Downloading mock data from GCS...")
+        console.print("Downloading mock data from GCS...")
         try:
             blob = bucket_obj.blob("init/mock-data.json")
             content = blob.download_as_text()
@@ -950,8 +973,12 @@ def init(mock_data: str | None, mcp_command: str, skip_import_tools: bool, uploa
         if run_import_tools(spin_url, mcp_command, auth_token=token):
             console.print("  [green]Tools imported successfully[/green]")
         else:
-            console.print("  [yellow]Warning:[/yellow] Failed to import tools. You may need to run manually:")
-            console.print(f"    deepfabric import-tools --transport stdio --command \"{mcp_command}\" --spin {spin_url} --header \"Authorization=Bearer $TOKEN\"")
+            console.print("  [yellow]Warning:[/yellow] Failed to import tools.")
+            console.print("  You may need to run manually:")
+            console.print("    deepfabric import-tools --transport stdio \\")
+            console.print(f'      --command "{mcp_command}" \\')
+            console.print(f"      --spin {spin_url} \\")
+            console.print('      --header "Authorization=Bearer $TOKEN"')
 
     # Check available tools in Spin
     console.print("\nChecking available tools in Spin service...")
