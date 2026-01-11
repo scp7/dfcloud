@@ -140,10 +140,23 @@ def config_init(project: str, region: str, bucket: str):
 @click.option("--name", "-n", help="Job name (defaults to config filename)")
 @click.option("--wait/--no-wait", default=False, help="Wait for job completion")
 @click.option("--timeout", default=3600, help="Job timeout in seconds")
-def submit(config_file: str, name: str | None, wait: bool, timeout: int):
+@click.option("--topic-only", is_flag=True, help="Only generate topic graph (skip dataset generation)")
+@click.option("--topics-load", type=str, help="GCS path to existing topic graph (e.g., outputs/job/timestamp/graph.jsonl)")
+def submit(config_file: str, name: str | None, wait: bool, timeout: int, topic_only: bool, topics_load: str | None):
     """Submit a DeepFabric job.
 
     CONFIG_FILE is the path to your deepfabric YAML configuration file.
+
+    Examples:
+
+        # Run full pipeline (topics + dataset)
+        dfcloud submit config.yaml
+
+        # Generate only the topic graph
+        dfcloud submit config.yaml --topic-only
+
+        # Generate dataset using existing topic graph
+        dfcloud submit config.yaml --topics-load outputs/my-job/20240115-120000/topics.jsonl
     """
     project_id = get_config_value("project_id")
     region = get_config_value("region")
@@ -168,20 +181,32 @@ def submit(config_file: str, name: str | None, wait: bool, timeout: int):
 
     console.print(f"  Config: gs://{bucket}/{gcs_config_path}")
 
+    if topic_only:
+        console.print(f"  Mode: [cyan]Topic graph generation only[/cyan]")
+    elif topics_load:
+        console.print(f"  Mode: [cyan]Dataset generation[/cyan]")
+        console.print(f"  Topics: gs://{bucket}/{topics_load}")
+
     # Execute Cloud Run Job
     with console.status("Starting Cloud Run Job..."):
         jobs_client = run_v2.JobsClient()
         job_path = f"projects/{project_id}/locations/{region}/jobs/{job_name}"
 
+        # Build environment variables
+        env_vars = [
+            run_v2.EnvVar(name="CONFIG_PATH", value=gcs_config_path),
+            run_v2.EnvVar(name="JOB_NAME", value=run_name),
+        ]
+
+        if topic_only:
+            env_vars.append(run_v2.EnvVar(name="TOPIC_ONLY", value="true"))
+        elif topics_load:
+            env_vars.append(run_v2.EnvVar(name="TOPICS_LOAD", value=topics_load))
+
         # Create execution with overrides
         overrides = run_v2.RunJobRequest.Overrides(
             container_overrides=[
-                run_v2.RunJobRequest.Overrides.ContainerOverride(
-                    env=[
-                        run_v2.EnvVar(name="CONFIG_PATH", value=gcs_config_path),
-                        run_v2.EnvVar(name="JOB_NAME", value=run_name),
-                    ]
-                )
+                run_v2.RunJobRequest.Overrides.ContainerOverride(env=env_vars)
             ],
             timeout=f"{timeout}s",
         )
@@ -221,6 +246,80 @@ def submit(config_file: str, name: str | None, wait: bool, timeout: int):
         except Exception as e:
             console.print(f"[red]Job failed: {e}[/red]")
             sys.exit(1)
+
+
+@cli.command("import-tools")
+@click.option("--mcp-command", default="npx dataforseo-mcp-server@latest",
+              help="Command to run the MCP server")
+@click.option("--wait/--no-wait", default=True, help="Wait for completion")
+def import_tools(mcp_command: str, wait: bool):
+    """Import tool schemas from MCP server into Spin service.
+
+    This runs a short-lived job that connects to the MCP server,
+    fetches tool definitions, and loads them into the Spin service.
+
+    Run this once after deploying, or when the MCP server tools change.
+    """
+    project_id = get_config_value("project_id")
+    region = get_config_value("region")
+    job_name = get_config_value("job_name")
+
+    console.print("[bold]Importing tools into Spin service...[/bold]")
+    console.print(f"  MCP command: {mcp_command}")
+
+    # Execute Cloud Run Job with import-tools mode
+    with console.status("Starting import-tools job..."):
+        jobs_client = run_v2.JobsClient()
+        job_path = f"projects/{project_id}/locations/{region}/jobs/{job_name}"
+
+        # Create execution with JOB_MODE=import-tools
+        overrides = run_v2.RunJobRequest.Overrides(
+            container_overrides=[
+                run_v2.RunJobRequest.Overrides.ContainerOverride(
+                    env=[
+                        run_v2.EnvVar(name="JOB_MODE", value="import-tools"),
+                        run_v2.EnvVar(name="MCP_COMMAND", value=mcp_command),
+                    ]
+                )
+            ],
+            timeout="300s",  # 5 minute timeout for import-tools
+        )
+
+        request = run_v2.RunJobRequest(name=job_path, overrides=overrides)
+        operation = jobs_client.run_job(request=request)
+
+    # Get execution name
+    execution_name = None
+    try:
+        if hasattr(operation, "metadata") and operation.metadata:
+            execution_name = operation.metadata.name
+    except Exception:
+        pass
+
+    console.print(f"  [green]Import job submitted![/green]")
+
+    if execution_name:
+        execution_id = execution_name.split("/")[-1]
+        console.print(f"  Execution ID: {execution_id}")
+
+    if wait:
+        console.print("\n[yellow]Waiting for import to complete...[/yellow]")
+        try:
+            result = operation.result()
+            if result.succeeded_count > 0:
+                console.print("[green]Tools imported successfully![/green]")
+            else:
+                console.print("[red]Import failed.[/red]")
+                if execution_name:
+                    console.print(f"Check logs: dfcloud logs {execution_id}")
+                sys.exit(1)
+        except Exception as e:
+            console.print(f"[red]Import failed: {e}[/red]")
+            sys.exit(1)
+    else:
+        if execution_name:
+            console.print(f"\nTo check status: dfcloud status {execution_id}")
+            console.print(f"To view logs:    dfcloud logs {execution_id}")
 
 
 @cli.command()
@@ -447,53 +546,157 @@ def download(job_run_name: str, output: str | None):
 
 
 @cli.command()
-def outputs():
-    """List available outputs in GCS."""
+@click.argument("job_name", required=False)
+@click.option("--files", "-f", is_flag=True, help="Show all files with sizes and timestamps")
+def outputs(job_name: str | None, files: bool):
+    """List available outputs in GCS.
+
+    If JOB_NAME is provided, lists files for that job.
+    Use --files to show detailed file listing.
+
+    Examples:
+
+        # List all jobs with outputs
+        dfcloud outputs
+
+        # List files for a specific job
+        dfcloud outputs my-job
+
+        # Show all files across all jobs
+        dfcloud outputs --files
+    """
     project_id = get_config_value("project_id")
     bucket = get_config_value("bucket")
 
     client = storage.Client(project=project_id)
     bucket_obj = client.bucket(bucket)
 
-    # List all job output folders
-    prefix = "outputs/"
-    iterator = bucket_obj.list_blobs(prefix=prefix, delimiter="/")
+    # If job_name provided, list files for that job
+    if job_name:
+        prefix = f"outputs/{job_name}/"
+        blobs = list(bucket_obj.list_blobs(prefix=prefix))
 
-    # Get prefixes (folders)
-    job_folders = set()
-    for blob in iterator:
-        parts = blob.name.replace(prefix, "").split("/")
-        if parts[0]:
-            job_folders.add(parts[0])
+        if not blobs:
+            console.print(f"[yellow]No outputs found for job: {job_name}[/yellow]")
+            return
 
-    # Also check prefixes
-    for prefix_name in iterator.prefixes:
-        job_name = prefix_name.replace("outputs/", "").rstrip("/")
-        if job_name:
-            job_folders.add(job_name)
+        table = Table(title=f"Outputs for {job_name}")
+        table.add_column("File", style="cyan")
+        table.add_column("Size", style="green", justify="right")
+        table.add_column("Created", style="dim")
+        table.add_column("GCS Path", style="dim")
 
-    if not job_folders:
-        console.print("[yellow]No outputs found[/yellow]")
+        for blob in sorted(blobs, key=lambda b: b.name):
+            if blob.name.endswith("/"):
+                continue
+
+            relative_path = blob.name.replace(f"outputs/{job_name}/", "")
+            size_kb = blob.size / 1024
+            size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb/1024:.1f} MB"
+            created = blob.time_created.strftime("%Y-%m-%d %H:%M") if blob.time_created else "-"
+            # Show path that can be used with --topics-load
+            gcs_path = blob.name
+
+            table.add_row(relative_path, size_str, created, gcs_path)
+
+        console.print(table)
+        console.print(f"\nTo download: dfcloud download {job_name}")
+        console.print(f"To use as topics: dfcloud submit config.yaml --topics-load <GCS Path>")
         return
 
-    table = Table(title="Available Job Outputs")
-    table.add_column("Job Name", style="cyan")
+    # List all job folders
+    if files:
+        # Show all files across all jobs
+        prefix = "outputs/"
+        blobs = list(bucket_obj.list_blobs(prefix=prefix))
 
-    for job_name in sorted(job_folders):
-        table.add_row(job_name)
+        if not blobs:
+            console.print("[yellow]No outputs found[/yellow]")
+            return
 
-    console.print(table)
-    console.print(f"\nTo download: dfcloud download <job-name>")
+        table = Table(title="All Output Files")
+        table.add_column("Job", style="cyan")
+        table.add_column("Timestamp", style="blue")
+        table.add_column("File", style="green")
+        table.add_column("Size", justify="right")
+        table.add_column("GCS Path", style="dim")
+
+        for blob in sorted(blobs, key=lambda b: b.name, reverse=True):
+            if blob.name.endswith("/"):
+                continue
+
+            parts = blob.name.replace("outputs/", "").split("/")
+            if len(parts) >= 3:
+                job = parts[0]
+                timestamp = parts[1]
+                filename = "/".join(parts[2:])
+            else:
+                continue
+
+            size_kb = blob.size / 1024
+            size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb/1024:.1f} MB"
+
+            table.add_row(job, timestamp, filename, size_str, blob.name)
+
+        console.print(table)
+    else:
+        # Just list job names
+        prefix = "outputs/"
+        iterator = bucket_obj.list_blobs(prefix=prefix, delimiter="/")
+
+        job_folders = set()
+        for blob in iterator:
+            parts = blob.name.replace(prefix, "").split("/")
+            if parts[0]:
+                job_folders.add(parts[0])
+
+        for prefix_name in iterator.prefixes:
+            jn = prefix_name.replace("outputs/", "").rstrip("/")
+            if jn:
+                job_folders.add(jn)
+
+        if not job_folders:
+            console.print("[yellow]No outputs found[/yellow]")
+            return
+
+        table = Table(title="Available Job Outputs")
+        table.add_column("Job Name", style="cyan")
+
+        for jn in sorted(job_folders):
+            table.add_row(jn)
+
+        console.print(table)
+        console.print(f"\nTo see files: dfcloud outputs <job-name>")
+        console.print(f"To download:  dfcloud download <job-name>")
 
 
 def get_identity_token(audience: str) -> str:
     """Get an identity token for authenticating with Cloud Run."""
+    import subprocess
+
+    # First try the Python library (works on GCP)
     try:
         token = id_token.fetch_id_token(Request(), audience)
         return token
-    except Exception as e:
-        console.print(f"[red]Error getting identity token:[/red] {e}")
-        console.print("Make sure you're running from Cloud Shell or have application default credentials set up.")
+    except Exception:
+        pass
+
+    # Fall back to gcloud CLI (works locally with user credentials)
+    try:
+        result = subprocess.run(
+            ["gcloud", "auth", "print-identity-token"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        console.print(f"[red]Error getting identity token:[/red] {e.stderr}")
+        console.print("Run: gcloud auth login")
+        sys.exit(1)
+    except FileNotFoundError:
+        console.print("[red]Error:[/red] gcloud CLI not found")
+        console.print("Install: https://cloud.google.com/sdk/docs/install")
         sys.exit(1)
 
 
@@ -596,7 +799,7 @@ def load_fixtures(spin_url: str, headers: dict, mock_data: dict) -> int:
     return loaded
 
 
-def run_import_tools(spin_url: str, mcp_command: str) -> bool:
+def run_import_tools(spin_url: str, mcp_command: str, auth_token: str | None = None) -> bool:
     """Run deepfabric import-tools to register tools with Spin service."""
     import subprocess
 
@@ -606,6 +809,9 @@ def run_import_tools(spin_url: str, mcp_command: str) -> bool:
         "--command", mcp_command,
         "--spin", spin_url,
     ]
+
+    if auth_token:
+        cmd.extend(["--header", f"Authorization=Bearer {auth_token}"])
 
     console.print(f"  Running: {' '.join(cmd)}")
 
@@ -734,11 +940,11 @@ def init(mock_data: str | None, mcp_command: str, skip_import_tools: bool, uploa
     # Import tools from MCP server
     if not skip_import_tools:
         console.print("\nImporting tools from MCP server...")
-        if run_import_tools(spin_url, mcp_command):
+        if run_import_tools(spin_url, mcp_command, auth_token=token):
             console.print("  [green]Tools imported successfully[/green]")
         else:
             console.print("  [yellow]Warning:[/yellow] Failed to import tools. You may need to run manually:")
-            console.print(f"    deepfabric import-tools --transport stdio --command \"{mcp_command}\" --spin {spin_url}")
+            console.print(f"    deepfabric import-tools --transport stdio --command \"{mcp_command}\" --spin {spin_url} --header \"Authorization=Bearer $TOKEN\"")
 
     # Check available tools in Spin
     console.print("\nChecking available tools in Spin service...")

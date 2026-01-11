@@ -79,6 +79,22 @@ resource "google_secret_manager_secret_version" "slack_webhook" {
   secret_data = var.slack_webhook_url
 }
 
+# Secret for Google API key (Gemini)
+resource "google_secret_manager_secret" "google_api_key" {
+  secret_id = "dfcloud-google-api-key"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_secret_manager_secret_version" "google_api_key" {
+  secret      = google_secret_manager_secret.google_api_key.id
+  secret_data = var.google_api_key
+}
+
 # Service account for DeepFabric job
 resource "google_service_account" "deepfabric_job" {
   account_id   = "deepfabric-job"
@@ -105,6 +121,13 @@ resource "google_secret_manager_secret_iam_member" "deepfabric_slack" {
   member    = "serviceAccount:${google_service_account.deepfabric_job.email}"
 }
 
+# IAM: DeepFabric job can access Google API key secret
+resource "google_secret_manager_secret_iam_member" "deepfabric_google_api_key" {
+  secret_id = google_secret_manager_secret.google_api_key.id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.deepfabric_job.email}"
+}
+
 # IAM: DeepFabric job can invoke Spin service
 resource "google_cloud_run_service_iam_member" "deepfabric_invoke_spin" {
   location = var.region
@@ -113,11 +136,12 @@ resource "google_cloud_run_service_iam_member" "deepfabric_invoke_spin" {
   member   = "serviceAccount:${google_service_account.deepfabric_job.email}"
 }
 
+
 # Spin Cloud Run Service
 resource "google_cloud_run_v2_service" "spin" {
   name     = "spin-service"
   location = var.region
-  ingress  = "INGRESS_TRAFFIC_INTERNAL_ONLY"
+  ingress  = "INGRESS_TRAFFIC_ALL"  # Allow external access for dfcloud CLI
 
   template {
     service_account = google_service_account.spin_service.email
@@ -192,6 +216,16 @@ resource "google_cloud_run_v2_job" "deepfabric" {
           value_source {
             secret_key_ref {
               secret  = google_secret_manager_secret.slack_webhook.id
+              version = "latest"
+            }
+          }
+        }
+
+        env {
+          name = "GOOGLE_API_KEY"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.google_api_key.id
               version = "latest"
             }
           }

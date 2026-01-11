@@ -56,3 +56,9 @@ variable "deepfabric_job_cpu" {
   type        = string
   default     = "2"
 }
+
+variable "google_api_key" {
+  description = "Google API key for Gemini"
+  type        = string
+  sensitive   = true
+}
