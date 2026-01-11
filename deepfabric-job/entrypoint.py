@@ -30,6 +30,11 @@ from google.cloud import storage
 # Global for auth proxy
 _spin_endpoint = None
 _auth_token = None
+_token_obtained_at = 0
+_token_lock = threading.Lock()
+
+# Refresh token every 45 minutes (tokens expire after ~1 hour)
+TOKEN_REFRESH_INTERVAL = 45 * 60
 
 
 def transform_tools_response(data: dict) -> dict:
@@ -84,7 +89,19 @@ class AuthProxyHandler(http.server.BaseHTTPRequestHandler):
         self._proxy_request("POST")
 
     def _proxy_request(self, method):
-        global _spin_endpoint, _auth_token
+        global _spin_endpoint, _auth_token, _token_obtained_at, _token_lock
+
+        # Refresh token if needed
+        with _token_lock:
+            if time.time() - _token_obtained_at > TOKEN_REFRESH_INTERVAL:
+                print("Refreshing auth token...")
+                new_token = get_identity_token(_spin_endpoint)
+                if new_token:
+                    _auth_token = new_token
+                    _token_obtained_at = time.time()
+                    print("Auth token refreshed successfully")
+                else:
+                    print("Warning: Failed to refresh auth token")
 
         # Build target URL
         target_url = f"{_spin_endpoint.rstrip('/')}{self.path}"
@@ -133,10 +150,11 @@ class AuthProxyHandler(http.server.BaseHTTPRequestHandler):
 
 def start_auth_proxy(spin_endpoint: str, port: int = 3000) -> threading.Thread:
     """Start a local proxy that adds auth to requests to Spin service."""
-    global _spin_endpoint, _auth_token
+    global _spin_endpoint, _auth_token, _token_obtained_at
 
     _spin_endpoint = spin_endpoint
     _auth_token = get_identity_token(spin_endpoint)
+    _token_obtained_at = time.time()
 
     if not _auth_token:
         print("Warning: Could not get identity token for auth proxy")
@@ -146,6 +164,7 @@ def start_auth_proxy(spin_endpoint: str, port: int = 3000) -> threading.Thread:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     print(f"Auth proxy started on localhost:{port} -> {spin_endpoint}")
+    print(f"Token will refresh every {TOKEN_REFRESH_INTERVAL // 60} minutes")
     return thread
 
 
