@@ -204,14 +204,9 @@ def update_config_for_proxy(config_path: Path) -> None:
         yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
 
 
-def get_progress_interval_from_config(config_path: Path) -> int:
-    """Get Slack progress update interval from config. Default 900 seconds (15 min)."""
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-
-    # Look for dfcloud.progress_interval in config
-    dfcloud_config = config.get("dfcloud", {})
-    return dfcloud_config.get("progress_interval", 900)
+def get_progress_interval() -> int:
+    """Get Slack progress update interval from environment. Default 900 seconds (15 min)."""
+    return int(os.environ.get("PROGRESS_INTERVAL", "900"))
 
 
 def get_output_files_from_config(
@@ -636,8 +631,8 @@ def run_generate_mode():
             )
             print(f"Expected outputs: {expected_outputs}")
 
-            # Get progress interval from config (default 900 seconds / 15 min)
-            progress_interval = get_progress_interval_from_config(local_config)
+            # Get progress interval from environment (default 900 seconds / 15 min)
+            progress_interval = get_progress_interval()
             print(f"Slack progress interval: {progress_interval} seconds")
 
             # Run deepfabric

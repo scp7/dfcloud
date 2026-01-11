@@ -123,13 +123,15 @@ def config_list():
 @click.option("--project", prompt="GCP Project ID", help="Your GCP project ID")
 @click.option("--region", default="us-central1", prompt="GCP Region", help="GCP region")
 @click.option("--bucket", prompt="GCS Bucket Name", help="GCS bucket for configs/outputs")
-def config_init(project: str, region: str, bucket: str):
+@click.option("--progress-interval", default=900, prompt="Slack progress interval (seconds)", help="Seconds between Slack progress updates")
+def config_init(project: str, region: str, bucket: str, progress_interval: int):
     """Initialize configuration interactively."""
     cfg = load_config()
     cfg["project_id"] = project
     cfg["region"] = region
     cfg["bucket"] = bucket
     cfg["job_name"] = "deepfabric-job"
+    cfg["progress_interval"] = progress_interval
     save_config(cfg)
     console.print("[green]Configuration saved![/green]")
     console.print(f"Config file: {CONFIG_FILE}")
@@ -197,6 +199,11 @@ def submit(config_file: str, name: str | None, wait: bool, timeout: int, topic_o
             run_v2.EnvVar(name="CONFIG_PATH", value=gcs_config_path),
             run_v2.EnvVar(name="JOB_NAME", value=run_name),
         ]
+
+        # Add progress interval from dfcloud config
+        cfg = load_config()
+        progress_interval = cfg.get("progress_interval", 900)
+        env_vars.append(run_v2.EnvVar(name="PROGRESS_INTERVAL", value=str(progress_interval)))
 
         if topic_only:
             env_vars.append(run_v2.EnvVar(name="TOPIC_ONLY", value="true"))
