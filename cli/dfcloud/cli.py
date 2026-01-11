@@ -144,7 +144,7 @@ def config_init(project: str, region: str, bucket: str, progress_interval: int):
 @click.argument("config_file", type=click.Path(exists=True))
 @click.option("--name", "-n", help="Job name (defaults to config filename)")
 @click.option("--wait/--no-wait", default=False, help="Wait for job completion")
-@click.option("--timeout", default=3600, help="Job timeout in seconds")
+@click.option("--timeout", default=86400, help="Job timeout in seconds (default: 24h)")
 @click.option("--topic-only", is_flag=True, help="Only generate topic graph")
 @click.option("--topics-load", type=str, help="GCS path to existing topic graph")
 def submit(
@@ -390,6 +390,8 @@ def _print_execution_status(execution):
         status = "[green]Succeeded[/green]"
     elif execution.failed_count > 0:
         status = "[red]Failed[/red]"
+    elif execution.cancelled_count > 0:
+        status = "[dim]Cancelled[/dim]"
     elif execution.running_count > 0:
         status = "[yellow]Running[/yellow]"
     else:
@@ -506,6 +508,8 @@ def list_executions(limit: int):
             status = "[green]Succeeded[/green]"
         elif execution.failed_count > 0:
             status = "[red]Failed[/red]"
+        elif execution.cancelled_count > 0:
+            status = "[dim]Cancelled[/dim]"
         elif execution.running_count > 0:
             status = "[yellow]Running[/yellow]"
         else:
