@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install deepfabric and dependencies
 RUN pip install --no-cache-dir \
-    deepfabric \
+    "deepfabric>=4.9.0" \
     google-cloud-storage \
     requests \
     pyyaml
